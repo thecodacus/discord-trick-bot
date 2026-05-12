@@ -101,7 +101,7 @@ class LlamaClient:
                 {"role": "user",   "content": user_message},
             ],
             "temperature": 0.7,
-            "max_tokens": 800,
+            "max_tokens": 4000,
             "stream": False,
         }
         try:
