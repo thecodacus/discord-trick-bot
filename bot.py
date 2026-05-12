@@ -136,6 +136,49 @@ class LlamaClient:
         log.warning("LLM returned empty content; raw msg=%r", msg)
         return "(the gatekeeper is silent... try again, or rephrase)"
 
+    async def stream_chat(self, system_prompt: str, user_message: str):
+        """Async-generator that yields ('content'|'reasoning', text) chunks
+        from a streaming completion. Caller is responsible for accumulating
+        and rendering. On HTTP error, yields a single ('error', msg) chunk."""
+        url = f"{self.base_url}/v1/chat/completions"
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_message},
+            ],
+            "temperature": 0.7,
+            "max_tokens": 4000,
+            "stream": True,
+        }
+        try:
+            async with self._client.stream("POST", url, json=payload,
+                                            timeout=httpx.Timeout(300.0, connect=10.0)) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    try:
+                        delta = chunk["choices"][0].get("delta", {}) or {}
+                    except (KeyError, IndexError):
+                        continue
+                    c = delta.get("content")
+                    r = delta.get("reasoning_content")
+                    if c:
+                        yield ("content", c)
+                    if r:
+                        yield ("reasoning", r)
+        except httpx.HTTPError as e:
+            log.exception("llama-server stream failed")
+            yield ("error", str(e))
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -250,10 +293,55 @@ async def handle_attempt(message: discord.Message) -> None:
     level_n = USER_LEVEL.get(message.author.id) or pick_default_level(message.author, LEVELS).n
     level = next(lvl for lvl in LEVELS if lvl.n == level_n)
 
-    async with message.channel.typing():
-        reply = await llama.chat(level.system_prompt, text)
+    # Send a placeholder reply we'll edit in place as tokens stream in.
+    placeholder = await message.reply("💭 *the gatekeeper is thinking...*",
+                                       mention_author=False)
 
-    won = detect_secret(reply, level.secret)
+    content_parts: list[str] = []
+    last_edit = 0.0  # monotonic timestamp
+    edit_interval = 1.2  # seconds; Discord caps at ~5 edits / 5s / channel
+    visible_now = ""
+
+    async for kind, chunk in llama.stream_chat(level.system_prompt, text):
+        if kind == "error":
+            await placeholder.edit(content=f"(the gatekeeper is napping... [{chunk}])")
+            return
+        if kind == "content":
+            content_parts.append(chunk)
+
+        # Render the visible portion: strip closed <think> blocks. If we're
+        # mid-think (open tag with no close yet), only show pre-think text.
+        full = "".join(content_parts)
+        closed_stripped = re.sub(r"<think>.*?</think>", "", full,
+                                  flags=re.DOTALL | re.IGNORECASE)
+        last_open = closed_stripped.rfind("<think>")
+        if last_open != -1:
+            visible = closed_stripped[:last_open].rstrip() + "\n*…thinking…*"
+        else:
+            visible = closed_stripped.strip()
+
+        if not visible:
+            visible = "💭 *the gatekeeper is thinking...*"
+
+        # Throttle edits.
+        now = asyncio.get_event_loop().time()
+        if now - last_edit >= edit_interval and visible != visible_now:
+            try:
+                await placeholder.edit(content=trim_reply(visible))
+                visible_now = visible
+                last_edit = now
+            except discord.HTTPException:
+                # 429 or transient -- discord.py auto-handles, just skip.
+                pass
+
+    # Stream finished. Final reply = fully-stripped content.
+    full = "".join(content_parts)
+    final = re.sub(r"<think>.*?</think>", "", full,
+                   flags=re.DOTALL | re.IGNORECASE).strip()
+    if not final:
+        final = "(the gatekeeper is silent... try again, or rephrase)"
+
+    won = detect_secret(final, level.secret)
     if won:
         guild = message.guild
         role = guild.get_role(level.role_id) if guild else None
@@ -270,9 +358,13 @@ async def handle_attempt(message: discord.Message) -> None:
             f"🎉 **{message.author.mention} cracked Level {level.n}!** "
             f"{'Role granted.' if granted else 'Role grant failed (check bot perms).'}\n\n"
         )
-        await message.reply(prefix + trim_reply(reply), mention_author=False)
-    else:
-        await message.reply(trim_reply(reply), mention_author=False)
+        final = prefix + final
+
+    try:
+        await placeholder.edit(content=trim_reply(final))
+    except discord.HTTPException:
+        # If the final edit fails (rate limit, etc.), fall back to a fresh reply.
+        await message.reply(trim_reply(final), mention_author=False)
 
 
 @client.event
