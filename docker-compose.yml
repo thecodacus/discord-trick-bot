@@ -1,0 +1,16 @@
+services:
+  trick-bot:
+    build: .
+    container_name: trick-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./prompts:/app/prompts:ro
+    # llama-server runs on the same host network so the bot can reach it
+    # at localhost:8080 (or via Tailscale IP if it's on another box).
+    network_mode: host
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
