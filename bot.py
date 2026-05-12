@@ -101,7 +101,7 @@ class LlamaClient:
                 {"role": "user",   "content": user_message},
             ],
             "temperature": 0.7,
-            "max_tokens": 400,
+            "max_tokens": 800,
             "stream": False,
         }
         try:
@@ -112,10 +112,29 @@ class LlamaClient:
             log.exception("llama-server request failed")
             return f"(the gatekeeper appears to be napping... [{e}])"
         try:
-            return data["choices"][0]["message"]["content"].strip()
+            msg = data["choices"][0]["message"]
         except (KeyError, IndexError):
             log.error("Unexpected response shape: %r", data)
             return "(the gatekeeper mumbled something incomprehensible)"
+
+        # Reasoning models (Gemma 4, Qwen3.x) may return their actual reply
+        # inside <think>...</think> blocks, or place it in `reasoning_content`
+        # while `content` is empty. Pull whichever has substance, strip the
+        # thinking tags, and fall back gracefully if nothing usable remains.
+        content   = (msg.get("content") or "").strip()
+        reasoning = (msg.get("reasoning_content") or "").strip()
+
+        # Strip <think>...</think> blocks (including nested/multiline) from content.
+        content_clean = re.sub(r"<think>.*?</think>", "", content,
+                               flags=re.DOTALL | re.IGNORECASE).strip()
+
+        # Pick the best non-empty payload.
+        for candidate in (content_clean, content, reasoning):
+            if candidate:
+                return candidate
+
+        log.warning("LLM returned empty content; raw msg=%r", msg)
+        return "(the gatekeeper is silent... try again, or rephrase)"
 
     async def aclose(self) -> None:
         await self._client.aclose()
