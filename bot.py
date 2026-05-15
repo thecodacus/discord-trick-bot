@@ -292,11 +292,15 @@ async def handle_attempt(message: discord.Message) -> None:
     level_n = USER_LEVEL.get(message.author.id) or pick_default_level(message.author, LEVELS).n
     level = next(lvl for lvl in LEVELS if lvl.n == level_n)
 
+    log.info("attempt user=%s (id=%s) level=%d secret=%r prompt=%r",
+             message.author, message.author.id, level.n, level.secret, text)
+
     # Send a placeholder reply we'll edit in place as tokens stream in.
     placeholder = await message.reply("💭 *the gatekeeper is thinking...*",
                                        mention_author=False)
 
     content_parts: list[str] = []
+    reasoning_parts: list[str] = []
     last_edit = 0.0  # monotonic timestamp
     edit_interval = 1.2  # seconds; Discord caps at ~5 edits / 5s / channel
     visible_now = ""
@@ -307,6 +311,8 @@ async def handle_attempt(message: discord.Message) -> None:
             return
         if kind == "content":
             content_parts.append(chunk)
+        elif kind == "reasoning":
+            reasoning_parts.append(chunk)
 
         # Render the visible portion: strip closed <think> blocks. If we're
         # mid-think (open tag with no close yet), only show pre-think text.
@@ -339,6 +345,15 @@ async def handle_attempt(message: discord.Message) -> None:
                    flags=re.DOTALL | re.IGNORECASE).strip()
     if not final:
         final = "(the gatekeeper is silent... try again, or rephrase)"
+
+    think_blocks = "\n---\n".join(re.findall(r"<think>(.*?)</think>", full,
+                                              flags=re.DOTALL | re.IGNORECASE))
+    reasoning_full = "".join(reasoning_parts).strip()
+    if think_blocks:
+        log.info("level=%d thinking (think-tags):\n%s", level.n, think_blocks.strip())
+    if reasoning_full:
+        log.info("level=%d thinking (reasoning_content):\n%s", level.n, reasoning_full)
+    log.info("level=%d reply: %s", level.n, final)
 
     won = detect_secret(final, level.secret)
     if won:
