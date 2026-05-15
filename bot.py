@@ -9,9 +9,8 @@ who tricked it gets the level's role and a celebration message.
 Usage in chat:
     /level <n>          -- pick which level to attempt (defaults to highest
                            unsolved by you, or 1)
-    @bot <message>      -- send a jailbreak attempt; bot replies in thread
-    plain message       -- if posted in the dedicated channel, also treated
-                           as an attempt (no @ needed)
+    @bot <message>      -- send a jailbreak attempt; bot replies in thread.
+                           The bot only responds when explicitly @mentioned.
 
 Stateless: each message is a fresh single-turn conversation. No memory across
 attempts, intentionally -- the game is one prompt at a time.
@@ -279,11 +278,11 @@ async def handle_attempt(message: discord.Message) -> None:
         return
     if not isinstance(message.author, discord.Member):
         return
+    if not client.user or client.user not in message.mentions:
+        return
 
     text = message.content.strip()
-    # Strip bot mention prefix if present.
-    if client.user:
-        text = re.sub(rf"^<@!?{client.user.id}>\s*", "", text).strip()
+    text = re.sub(rf"<@!?{client.user.id}>", "", text).strip()
     if not text:
         return
 
