@@ -377,8 +377,13 @@ async def handle_attempt(message: discord.Message) -> None:
     try:
         await placeholder.edit(content=trim_reply(final))
     except discord.HTTPException:
-        # If the final edit fails (rate limit, etc.), fall back to a fresh reply.
-        await message.reply(trim_reply(final), mention_author=False)
+        # Final edit failed (rate limit, or user deleted the original message /
+        # placeholder, which returns 50001 Missing Access). Try a fresh reply;
+        # if that also fails, just log -- we've already logged the reply above.
+        try:
+            await message.reply(trim_reply(final), mention_author=False)
+        except discord.HTTPException:
+            log.warning("could not deliver final reply (message/channel gone?)")
 
 
 @client.event
